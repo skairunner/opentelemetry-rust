@@ -456,6 +456,15 @@ impl opentelemetry::sdk::export::trace::SpanExporter for SpanExporter {
                 metadata,
                 ..
             } => {
+                // Compile a set of span names to report if exporting fails.
+                use std::collections::HashSet;
+
+                let mut span_names: HashSet<_> = Default::default();
+
+                for span in &batch {
+                    span_names.insert(span.name.clone());
+                }
+
                 let mut request = Request::new(TonicRequest {
                     resource_spans: batch.into_iter().map(Into::into).collect(),
                 });
@@ -473,11 +482,24 @@ impl opentelemetry::sdk::export::trace::SpanExporter for SpanExporter {
                     }
                 }
 
-                trace_exporter
-                    .to_owned()
-                    .export(request)
-                    .await
-                    .map_err::<crate::Error, _>(Into::into)?;
+                if let Err(e) = trace_exporter.to_owned().export(request).await {
+                    let extra_info = span_names
+                        .into_iter()
+                        .map(|cow| cow.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+
+                    let error: crate::Error = Into::into(e);
+                    let error = match error {
+                        crate::Error::Status { code, message } => crate::Error::Status {
+                            code,
+                            message: format!("{}\nAdditional info: {}", message, extra_info),
+                        },
+                        _ => error,
+                    };
+
+                    Err(error)?
+                }
 
                 Ok(())
             }
